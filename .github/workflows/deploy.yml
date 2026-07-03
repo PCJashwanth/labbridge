@@ -1,0 +1,71 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm ci
+      - run: npm test
+
+  deploy-staging:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm ci
+      - uses: aws-actions/setup-sam@v2
+        with: { use-installer: true }
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+      - run: sam build
+      - run: |
+          sam deploy --no-confirm-changeset --no-fail-on-empty-changeset \
+            --stack-name labbridge-staging --resolve-s3 --capabilities CAPABILITY_IAM \
+            --parameter-overrides Stage=staging \
+              LabRoleArn=${{ secrets.LAB_ROLE_ARN }} JwtSecret=${{ secrets.JWT_SECRET }}
+
+  # Promotion to production is gated on a version tag (vX.Y.Z) and, via the
+  # GitHub "production" environment, an optional manual approval.
+  deploy-production:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: npm ci
+      - uses: aws-actions/setup-sam@v2
+        with: { use-installer: true }
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+      - run: sam build
+      - run: |
+          sam deploy --no-confirm-changeset --no-fail-on-empty-changeset \
+            --stack-name labbridge-production --resolve-s3 --capabilities CAPABILITY_IAM \
+            --parameter-overrides Stage=production \
+              LabRoleArn=${{ secrets.LAB_ROLE_ARN }} JwtSecret=${{ secrets.JWT_SECRET }}

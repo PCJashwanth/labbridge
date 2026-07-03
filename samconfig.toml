@@ -1,0 +1,20 @@
+version = 0.1
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+stack_name = "labbridge-staging"
+region = "us-east-1"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+fail_on_empty_changeset = false
+# Fill these in locally (do NOT commit real secrets):
+parameter_overrides = "Stage=\"staging\" LabRoleArn=\"arn:aws:iam::648965221411:role/LabRole\" NotificationEmail=\"ha440000@dal.ca\""
+s3_prefix = "labbridge-staging"
+image_repositories = []
+
+[default.global.parameters]
+region = "us-east-1"

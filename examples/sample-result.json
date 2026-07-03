@@ -1,0 +1,12 @@
+{
+  "patientId": "patient-001",
+  "patientEmail": "patient001@example.com",
+  "providerId": "provider-042",
+  "testType": "CBC",
+  "collectedAt": "2026-07-02T09:30:00.000Z",
+  "analytes": [
+    { "code": "718-7",  "name": "Hemoglobin", "value": 17.8, "unit": "g/dL",      "refLow": 13.5, "refHigh": 17.5 },
+    { "code": "4544-3", "name": "Hematocrit", "value": 45,   "unit": "%",         "refLow": 41,   "refHigh": 53 },
+    { "code": "6690-2", "name": "WBC",        "value": 11.5, "unit": "x10^3/uL",  "refLow": 4.5,  "refHigh": 11.0 }
+  ]
+}

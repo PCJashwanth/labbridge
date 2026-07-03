@@ -1,0 +1,22 @@
+{
+  "name": "labbridge",
+  "version": "1.0.0",
+  "description": "Secure serverless clinical lab-results exchange on AWS (CSCI 5411 term project)",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test",
+    "mint-token": "node scripts/mint-token.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@aws-sdk/client-sns": "^3.600.0",
+    "@aws-sdk/client-sqs": "^3.600.0",
+    "@aws-sdk/lib-dynamodb": "^3.600.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.0"
+  }
+}

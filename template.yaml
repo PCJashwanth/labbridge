@@ -1,0 +1,249 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  LabBridge - secure serverless clinical lab-results exchange (CSCI 5411 term project).
+  Fully deployed via Infrastructure-as-Code; no manually created resources.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: staging
+    AllowedValues: [staging, production]
+  LabRoleArn:
+    Type: String
+    Description: ARN of the pre-existing execution role (AWS Academy LabRole).
+  JwtSecret:
+    Type: String
+    NoEcho: true
+    Description: HMAC secret for the JWT authorizer (use an SSM SecureString in production).
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: Optional email subscribed to the SNS results-ready topic.
+
+Conditions:
+  HasEmail: !Not [!Equals [!Ref NotificationEmail, '']]
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Architectures: [arm64]        # Graviton: ~20% cheaper + lower energy (Cost + Sustainability)
+    MemorySize: 256
+    Timeout: 15
+    Tracing: Active               # AWS X-Ray distributed tracing (Operational Excellence)
+    Environment:
+      Variables:
+        RESULTS_TABLE: !Ref ResultsTable
+        AUDIT_TABLE: !Ref AuditTable
+        DOCUMENTS_BUCKET: !Ref DocumentsBucket
+        QUEUE_URL: !Ref ProcessingQueue
+        TOPIC_ARN: !Ref ResultsTopic
+        JWT_SECRET: !Ref JwtSecret
+        DEID_SALT: !Ref JwtSecret
+  Api:
+    TracingEnabled: true
+
+Resources:
+
+  # ---------------- API layer ----------------
+  LabApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+      Auth:
+        DefaultAuthorizer: TokenAuthorizer
+        Authorizers:
+          TokenAuthorizer:
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+            FunctionPayloadType: TOKEN
+            Identity:
+              Header: Authorization
+      MethodSettings:                 # request throttling (Reliability + Security)
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          ThrottlingBurstLimit: 50
+          ThrottlingRateLimit: 25
+
+  # ---------------- Functions ----------------
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties: { Minify: true, Target: node20, EntryPoints: [src/handlers/authorizer.mjs] }
+    Properties:
+      CodeUri: .
+      Handler: authorizer.handler
+      Role: !Ref LabRoleArn
+
+  SubmitFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties: { Minify: true, Target: node20, EntryPoints: [src/handlers/submit.mjs] }
+    Properties:
+      CodeUri: .
+      Handler: submit.handler
+      Role: !Ref LabRoleArn
+      Events:
+        Post:
+          Type: Api
+          Properties: { RestApiId: !Ref LabApi, Path: /results, Method: post }
+
+  QueryFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties: { Minify: true, Target: node20, EntryPoints: [src/handlers/query.mjs] }
+    Properties:
+      CodeUri: .
+      Handler: query.handler
+      Role: !Ref LabRoleArn
+      Events:
+        Get:
+          Type: Api
+          Properties: { RestApiId: !Ref LabApi, Path: '/patients/{patientId}/results', Method: get }
+
+  NormalizeFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties: { Minify: true, Target: node20, EntryPoints: [src/handlers/normalize.mjs] }
+    Properties:
+      CodeUri: .
+      Handler: normalize.handler
+      Role: !Ref LabRoleArn
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ProcessingQueue.Arn
+            BatchSize: 5
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  ExportFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties: { Minify: true, Target: node20, EntryPoints: [src/handlers/export.mjs] }
+    Properties:
+      CodeUri: .
+      Handler: export.handler
+      Role: !Ref LabRoleArn
+      Events:
+        Nightly:
+          Type: Schedule
+          Properties:
+            Schedule: 'cron(0 5 * * ? *)'   # 05:00 UTC daily de-identified export
+            Description: Nightly de-identified analytics export
+
+  # ---------------- Storage ----------------
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      VersioningConfiguration: { Status: Enabled }      # recover overwritten/deleted objects
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:                           # cost + sustainability
+        Rules:
+          - Id: TierRawDocuments
+            Prefix: raw/
+            Status: Enabled
+            Transitions:
+              - { StorageClass: STANDARD_IA, TransitionInDays: 30 }
+              - { StorageClass: GLACIER,     TransitionInDays: 90 }
+          - Id: ExpireExports
+            Prefix: deidentified/
+            Status: Enabled
+            ExpirationInDays: 365
+
+  ResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: patientId,  AttributeType: S }
+        - { AttributeName: resultId,   AttributeType: S }
+        - { AttributeName: providerId, AttributeType: S }
+      KeySchema:
+        - { AttributeName: patientId, KeyType: HASH }
+        - { AttributeName: resultId,  KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: byProvider
+          KeySchema:
+            - { AttributeName: providerId, KeyType: HASH }
+            - { AttributeName: resultId,   KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }  # RPO ~5 min
+      SSESpecification: { SSEEnabled: true }
+
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: patientId, AttributeType: S }
+        - { AttributeName: timestamp, AttributeType: S }
+      KeySchema:
+        - { AttributeName: patientId, KeyType: HASH }
+        - { AttributeName: timestamp, KeyType: RANGE }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+      SSESpecification: { SSEEnabled: true }
+
+  # ---------------- Messaging ----------------
+  ProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 90
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ProcessingDLQ.Arn
+        maxReceiveCount: 3            # poison messages move to the DLQ after 3 attempts
+
+  ProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600  # 14 days
+
+  ResultsTopic:
+    Type: AWS::SNS::Topic
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail
+    Properties:
+      TopicArn: !Ref ResultsTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # ---------------- Monitoring ----------------
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: A message landed in the dead-letter queue (processing failure).
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - { Name: QueueName, Value: !GetAtt ProcessingDLQ.QueueName }
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref ResultsTopic]
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the LabBridge API
+    Value: !Sub 'https://${LabApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}'
+  DocumentsBucketName:
+    Value: !Ref DocumentsBucket
+  ResultsTableName:
+    Value: !Ref ResultsTable
+  DeadLetterQueueUrl:
+    Value: !Ref ProcessingDLQ
